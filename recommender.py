@@ -1,4 +1,7 @@
+from flask import logging, jsonify
 from neo4j import GraphDatabase
+from neo4j.exceptions import ServiceUnavailable
+
 
 class Recommender:
     def __init__(self, uri, user, password):
@@ -21,33 +24,49 @@ class Recommender:
         result = tx.run(query, person_name=person_name)
         return [record["name"] for record in result]
 
-    def find_restaurants(self, parameter_type, parameter_value):
+    def find_person(self, person_name):
+        with self.driver.session() as session:
+            result = session.read_transaction(self._find_and_return_person, person_name)
+            return {"person": result}
+
+    @staticmethod
+    def _find_and_return_person(tx, person_name):
+        query = (
+            """MATCH (p:Person), (per:Person {name: $person_name}) 
+            WHERE NOT (p)-[:IS_FRIEND_OF]->(per) 
+            AND NOT (per)-[:IS_FRIEND_OF]->(p) 
+            AND NOT p.name = $person_name RETURN p.name AS name"""
+        )
+        result = tx.run(query, person_name=person_name)
+        return [record["name"] for record in result]
+
+    def find_restaurants(self, cuisine, location, person):
         with self.driver.session() as session:
             result = session.read_transaction(
                 self._find_and_return_restaurants,
-                parameter_type,
-                parameter_value)
+                cuisine,
+                location,
+                person)
             return {"restaurants": result}
 
     @staticmethod
-    def _find_and_return_restaurants(tx, parameter_type, parameter_value):
-        if(parameter_type == "loc"):
-            query = (
-            """MATCH (restaurant)-[:LOCATED_IN]->(l:Location{name:$parameter_value})
-            RETURN restaurant.name AS name"""
-            )
-        elif(parameter_type == "cui"):
-            query = (
-                """MATCH (restaurant)-[:SERVES]->(l:Cuisine{name:$parameter_value})
-                RETURN restaurant.name AS name"""
-            )
-        elif(parameter_type == "lik"):
-            query = (
-                """MATCH (l:Person{name:$parameter_value}) -[:LIKES]->(restaurant)
-                RETURN restaurant.name AS name"""
-            )
-        result = tx.run(query, parameter_value=parameter_value)
-        return [record["name"] for record in result]
+    def _find_and_return_restaurants(tx, cuisine, location, person):
+        cuisine_string = "(cuisine)" if cuisine == '' else "(cuisine:Cuisine {name: $cuisine})"
+        location_string = "(location)" if location == '' else "(location:Location {name: $location})"
+        person_string = "(person)" if person == '' else "(person:Person {name: $person})"
+
+        query = '''MATCH (restaurant:Restaurant)-[:LOCATED_IN]->{location_string},
+                    (restaurant)-[:SERVES]->{cuisine_string},
+                    {person_string}-[:LIKES]->(restaurant)
+                    WITH restaurant.name AS name, cuisine.name AS cuisine, location.name AS location, collect(person.name) AS likers
+                    RETURN name, cuisine, location, likers'''.format(location_string=location_string, cuisine_string=cuisine_string, person_string=person_string)
+
+        result = tx.run(query, cuisine=cuisine, location=location, person=person)
+        try:
+            return [{"restaurant": row["name"], "cuisine": row["cuisine"], "location": row["location"], "likers": row["likers"]} for row in result]
+        except ServiceUnavailable as exception:
+            logging.error("{query} raised an error: \n {exception}".format(query=query, exception=exception))
+            raise
 
     def find_recommendations(self, person):
         with self.driver.session() as session:
@@ -78,6 +97,56 @@ class Recommender:
             })
 
         return records
+
+
+    def find_best(self, cuisine_name, location_name, person_list, max):
+        with self.driver.session() as session:
+            result = session.read_transaction(self._find_best, cuisine_name, location_name, person_list, max)
+            return result
+
+    @staticmethod
+    def _find_best(tx, cuisine_name, location_name, person_list, max):
+        # simple hack to generalized and parameterized functions into one
+        cuisine_string = "(cuisine)" if cuisine_name == '' else "(cuisine:Cuisine {name: $cuisine_name})"
+        location_string = "(location)" if location_name == '' else "(location:Location {name: $location_name})"
+        person_string = "" if len(person_list) == 0 else "WHERE person.name IN %s" % (str(person_list))
+
+        # if True, return only the restaurants with the highest number of likes by friends
+        if (max):
+            query = (
+                '''MATCH (restaurant:Restaurant)-[:LOCATED_IN]->{location},
+                      (restaurant)-[:SERVES]->{cuisine},
+                      (person:Person)-[:LIKES]->(restaurant)
+                {person}
+                WITH restaurant.name AS name, collect(person.name) AS likers, COUNT(*) AS occurence
+                WITH MAX(occurence) as max_count
+                MATCH (restaurant:Restaurant)-[:LOCATED_IN]->{location},
+                    (restaurant)-[:SERVES]->{cuisine},
+                    (person:Person)-[:LIKES]->(restaurant)
+                {person}
+                    WITH restaurant.name AS name, collect(person.name) AS likers, COUNT(*) AS occurence, max_count
+                    WHERE occurence = max_count
+                    RETURN name, likers, occurence'''.format(location=location_string, cuisine=cuisine_string,
+                                                             person=person_string)
+                )
+        else:
+            query = (
+                    '''MATCH (restaurant:Restaurant)-[:LOCATED_IN]->%s,
+                            (restaurant)-[:SERVES]->%s,
+                            (person:Person)-[:LIKES]->(restaurant)
+                    %s
+                    RETURN restaurant.name AS name, collect(person.name) AS likers, COUNT(*) AS occurence
+                    ORDER BY occurence DESC''' % (location_string, cuisine_string, person_string)
+            )
+
+        result = tx.run(query, cuisine_name=cuisine_name, location_name=location_name, person_list=person_list)
+        try:
+            return jsonify([{"restaurant": row["name"], "likers": row["likers"], "occurence": row["occurence"]} for row in result])
+        except ServiceUnavailable as exception:
+            logging.error("{query} raised an error: \n {exception}".format(query=query, exception=exception))
+            raise
+
+
 
     def like_restaurant(self, person_name, restaurant_name):
         with self.driver.session() as session:
