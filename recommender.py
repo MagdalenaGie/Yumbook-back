@@ -53,17 +53,17 @@ class Recommender:
     def _find_and_return_restaurants(tx, cuisine, location, person):
         cuisine_string = "(cuisine)" if cuisine == '' else "(cuisine:Cuisine {name: $cuisine})"
         location_string = "(location)" if location == '' else "(location:Location {name: $location})"
-        person_string = "(person)" if person == '' else "(person:Person {name: $person})"
+        person_string = "" if person == '' else ",(person:Person {name: $person})-[:LIKES]->(restaurant)"
 
         query = '''MATCH (restaurant:Restaurant)-[:LOCATED_IN]->{location_string},
-                    (restaurant)-[:SERVES]->{cuisine_string},
-                    {person_string}-[:LIKES]->(restaurant)
-                    WITH restaurant.name AS name, cuisine.name AS cuisine, location.name AS location, collect(person.name) AS likers
-                    RETURN name, cuisine, location, likers'''.format(location_string=location_string, cuisine_string=cuisine_string, person_string=person_string)
+                    (restaurant)-[:SERVES]->{cuisine_string}
+                    {person_string}
+                    WITH restaurant.name AS name, cuisine.name AS cuisine, location.name AS location
+                    RETURN name, cuisine, location'''.format(location_string=location_string, cuisine_string=cuisine_string, person_string=person_string)
 
         result = tx.run(query, cuisine=cuisine, location=location, person=person)
         try:
-            return [{"restaurant": row["name"], "cuisine": row["cuisine"], "location": row["location"], "likers": row["likers"]} for row in result]
+            return [{"restaurant": row["name"], "cuisine": row["cuisine"], "location": row["location"]} for row in result]
         except ServiceUnavailable as exception:
             logging.error("{query} raised an error: \n {exception}".format(query=query, exception=exception))
             raise
@@ -150,66 +150,37 @@ class Recommender:
 
     def like_restaurant(self, person_name, restaurant_name):
         with self.driver.session() as session:
-            session.write_transaction(
-                self._delete_relation_person_restaurant,
-                False,
-                person_name,
-                restaurant_name)
             result = session.write_transaction(
                 self._create_relation_person_restaurant,
-                True,
                 person_name,
                 restaurant_name)
             return result
 
     def dislike_restaurant(self, person_name, restaurant_name):
         with self.driver.session() as session:
-            session.write_transaction(
-                self._delete_relation_person_restaurant,
-                True,
-                person_name,
-                restaurant_name)
             result = session.write_transaction(
-                self._create_relation_person_restaurant,
-                False,
+                self._delete_relation_person_restaurant,
                 person_name,
                 restaurant_name)
             return result
 
     @staticmethod
-    def _create_relation_person_restaurant(tx, like, person_name, restaurant_name):
-        if(like):
-            query = (
-            """MATCH (p:Person), (r:Restaurant)
-            WHERE p.name=$person_name AND r.name=$restaurant_name
-            CREATE (p)-[:LIKES]->(r)"""
-            )
-        else:
-            query = (
-            """MATCH (p:Person), (r:Restaurant)
-            WHERE p.name=$person_name AND r.name=$restaurant_name
-            CREATE (p)-[:DISLIKES]->(r)"""
-            )
+    def _create_relation_person_restaurant(tx, person_name, restaurant_name):
+        query = (
+            """MATCH (p:Person{name:$person_name}), (r:Restaurant{name:$restaurant_name})
+            CREATE (p)-[:LIKES]->(r) RETURN p.name"""
+        )
         result = tx.run(query, person_name=person_name, restaurant_name=restaurant_name)
-        return result
+        return result.data()[0]
 
     @staticmethod
-    def _delete_relation_person_restaurant(tx, like, person_name, restaurant_name):
-        # SHOULD ADD LOGIC TO PREVENT FORM CREATING BOTH LIKE AND DISLAKE REACTION AT THE SAME MOMENT!
-        if (like):
-            query = (
-                """OPTIONAL MATCH (p: Person)-[rel:LIKES]->(r:Restaurant) 
-                WHERE p.name=$person_name AND r.name=$restaurant_name
-                DELETE rel"""
-            )
-        else:
-            query = (
-                """OPTIONAL MATCH (p: Person)-[rel:DISLIKES]->(r:Restaurant) 
-                WHERE p.name=$person_name AND r.name=$restaurant_name
-                DELETE rel"""
-            )
+    def _delete_relation_person_restaurant(tx, person_name, restaurant_name):
+        query = (
+            """OPTIONAL MATCH (p:Person{name:$person_name})-[relation:LIKES]->(r:Restaurant{name:$restaurant_name})
+            DELETE relation RETURN p.name"""
+        )
         result = tx.run(query, person_name=person_name, restaurant_name=restaurant_name)
-        return result
+        return result.data()[0]
 
     def create_user(self, name, login, passw):
         with self.driver.session() as session:
@@ -223,10 +194,14 @@ class Recommender:
     @staticmethod
     def _create_node_person(tx, name, login, passw):
         query = (
-            """CREATE (p:Person {name:$name, login:$login, password:$password})"""
+            """CREATE (p:Person {name:$name, login:$login, password:$password}) RETURN p.name"""
         )
         result = tx.run(query, name=name, login=login, password=passw)
-        return result
+        try:
+            return result.data()[0]
+        except ServiceUnavailable as exception:
+            logging.error("{query} raised an error: \n {exception}".format(query=query, exception=exception))
+            raise
 
     def make_friends(self, name1, name2):
         with self.driver.session() as session:
@@ -250,33 +225,35 @@ class Recommender:
     def _create_or_delete_relation_person_person(tx, create, name1, name2):
         if create:
             query = (
-                """MATCH (p:Person), (r:Person)
-                WHERE p.name=$name1 AND r.name=$name2
-                CREATE (p)-[:IS_FRIEND_OF]->(r)"""
+                """MATCH (p:Person{name:$name1}), (r:Person{name:$name2})
+                CREATE (p)-[:IS_FRIEND_OF]->(r) RETURN p.name"""
             )
         else:
             query = (
-                """MATCH (p:Person), (r:Person)
-                WHERE p.name=$name1 AND r.name=$name2
-                DELETE (p)-[:IS_FRIEND_OF]->(r)"""
+                """MATCH (p:Person {name:$name1})-[relation:IS_FRIEND_OF]->(r:Person{name:$name2})
+                    DELETE relation return p.name"""
             )
         result = tx.run(query, name1=name1, name2=name2)
-        return result
+        try:
+            return result.data()[0]
+        except ServiceUnavailable as exception:
+            logging.error("{query} raised an error: \n {exception}".format(query=query, exception=exception))
+            raise
 
     def login(self, login):
         with self.driver.session() as session:
             result = session.read_transaction(
                 self._check_password,
                 login)
-            return {"password": result}
+        return result
 
     @staticmethod
     def _check_password(tx, login):
         query = (
-            """OPTIONAL MATCH (p:Person{login:$login}) RETURN p.password AS password"""
+            """OPTIONAL MATCH (p:Person{login:$login}) RETURN p.password AS password, p.name as name"""
         )
         result = tx.run(query, login=login)
-        return [record["password"] for record in result]
+        return result.data()[0]
 
 # for testing purpose, can be commented out
 if __name__ == "__main__":
