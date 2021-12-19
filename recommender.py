@@ -48,10 +48,10 @@ class Recommender:
     @staticmethod
     def _find_and_return_all(tx):
         query = (
-            """MATCH (n:Person) RETURN n.name AS name"""
+            """MATCH (n:Person) RETURN n.name AS name, n.login AS login"""
         )
         result = tx.run(query)
-        return [record["name"] for record in result]
+        return [{"user": row["name"], "login": row["login"]} for row in result]
 
     def find_restaurants(self, cuisine, location, person):
         with self.driver.session() as session:
