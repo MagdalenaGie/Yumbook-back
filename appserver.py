@@ -35,6 +35,11 @@ async def get_person():
     result = neo_db.find_person(person)
     return result
 
+@app.get('/get-all')
+async def get_person():
+    result = neo_db.find_all()
+    return result
+
 # @app.get('/get-restaurants')
 # async def get_restaurants():
 #     cuisine = request.args.get('cuisine')

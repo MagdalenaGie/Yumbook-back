@@ -40,6 +40,19 @@ class Recommender:
         result = tx.run(query, person_name=person_name)
         return [record["name"] for record in result]
 
+    def find_all(self):
+        with self.driver.session() as session:
+            result = session.read_transaction(self._find_and_return_person)
+            return {"all": result}
+
+    @staticmethod
+    def _find_and_return_all(tx):
+        query = (
+            """MATCH (n:Person) RETURN n.name AS name"""
+        )
+        result = tx.run(query)
+        return [record["name"] for record in result]
+
     def find_restaurants(self, cuisine, location, person):
         with self.driver.session() as session:
             result = session.read_transaction(
