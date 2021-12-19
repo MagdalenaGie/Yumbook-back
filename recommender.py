@@ -42,7 +42,7 @@ class Recommender:
 
     def find_all(self):
         with self.driver.session() as session:
-            result = session.read_transaction(self._find_and_return_person)
+            result = session.read_transaction(self._find_and_return_all)
             return {"all": result}
 
     @staticmethod
