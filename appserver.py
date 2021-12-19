@@ -36,7 +36,7 @@ async def get_person():
     return result
 
 @app.get('/get-all')
-async def get_person():
+async def get_all():
     result = neo_db.find_all()
     return result
 
